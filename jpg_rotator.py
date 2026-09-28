@@ -7,12 +7,14 @@ re-checked every N seconds until Stop is pressed, and the log is also saved to
 JpgRotator_log.txt in the output folder.
 """
 
+import faulthandler
 import json
 import os
 import queue
 import sys
 import threading
 import tkinter as tk
+import traceback
 from datetime import datetime
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -264,9 +266,40 @@ def self_test():
     sys.exit(0)
 
 
+def crash_log_path():
+    return os.path.join(os.path.dirname(settings_path()), "crash_log.txt")
+
+
+def install_crash_logging():
+    """Record any crash in crash_log.txt next to the settings file.
+
+    The packaged exe has no console, so without this an unexpected error would make
+    the program vanish without a trace.
+    """
+    path = crash_log_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        crash_file = open(path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        return
+    crash_file.write(f"\n=== {APP_NAME} started {datetime.now():%Y-%m-%d %H:%M:%S} ===\n")
+    faulthandler.enable(file=crash_file, all_threads=True)  # hard crashes
+
+    def write_exception(title, exc_type, exc, tb):
+        crash_file.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {title}\n")
+        crash_file.write("".join(traceback.format_exception(exc_type, exc, tb)))
+
+    sys.excepthook = lambda t, e, tb: write_exception("Unhandled error", t, e, tb)
+    threading.excepthook = lambda a: write_exception(
+        f"Unhandled error in thread {a.thread.name if a.thread else '?'}", a.exc_type, a.exc_value, a.exc_traceback
+    )
+    return write_exception
+
+
 def main():
     if "--selftest" in sys.argv:
         self_test()
+    write_exception = install_crash_logging()
     if sys.platform == "win32":
         try:  # crisp text on high-DPI screens
             import ctypes
@@ -275,7 +308,15 @@ def main():
         except Exception:
             pass
     root = tk.Tk()
-    RotatorApp(root)
+    app = RotatorApp(root)
+
+    def report_callback_exception(exc_type, exc, tb):
+        # An error in a button/timer handler: record it and keep the window open.
+        if write_exception:
+            write_exception("Error in window event", exc_type, exc, tb)
+        app.log(f"ERROR: unexpected problem in the window: {exc!r} (details in {crash_log_path()})")
+
+    root.report_callback_exception = report_callback_exception
     root.mainloop()
 
 

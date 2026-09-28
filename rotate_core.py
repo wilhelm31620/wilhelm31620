@@ -1,7 +1,9 @@
 """Core logic: find recent JPGs and write 90-degree clockwise rotated copies."""
 
+import io
 import os
 import threading
+import traceback
 import time
 from datetime import datetime, timedelta
 
@@ -71,8 +73,9 @@ def rotate_jpg(src_path, dst_path):
     """Save a copy of src_path rotated 90 degrees clockwise to dst_path.
 
     Any EXIF orientation flag is applied first, so the output is rotated relative
-    to how the image actually displays. The file is written to a temporary name
-    and then renamed, so a half-written file is never left under the real name.
+    to how the image actually displays. The JPEG is built in memory and written in
+    one go; if writing fails part way, the partial file is deleted. (No temp-file +
+    rename, because some network/cloud drives refuse renames - WinError 17.)
     """
     with Image.open(src_path) as img:
         img = ImageOps.exif_transpose(img)
@@ -86,13 +89,17 @@ def rotate_jpg(src_path, dst_path):
         if rotated.mode not in ("RGB", "L", "CMYK"):
             rotated = rotated.convert("RGB")
 
-        tmp_path = dst_path + ".tmp"
+        buffer = io.BytesIO()
+        rotated.save(buffer, "JPEG", **save_kwargs)
+
+    # "xb" = create only; never overwrites a file that already exists.
+    with open(dst_path, "xb") as f:
         try:
-            rotated.save(tmp_path, "JPEG", **save_kwargs)
-            os.replace(tmp_path, dst_path)
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            f.write(buffer.getvalue())
+        except BaseException:
+            f.close()
+            os.remove(dst_path)
+            raise
 
 
 def new_state():
@@ -196,7 +203,11 @@ def watch(input_dir, output_dir, days, interval_seconds, log, status, stop_event
 
     state = new_state()
     while not stop_event.is_set():
-        summary = process(input_dir, output_dir, days, log, stop_event.is_set, state)
+        try:
+            summary = process(input_dir, output_dir, days, log, stop_event.is_set, state)
+        except Exception:
+            log("ERROR: unexpected problem during check:\n" + traceback.format_exc().rstrip())
+            summary = {"found": 0, "created": 0, "skipped": 0, "errors": 1}
         now = datetime.now()
         text = (
             "Last check {time}: found {found}, created {created}, already rotated {skipped}, "
