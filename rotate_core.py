@@ -1,13 +1,50 @@
 """Core logic: find recent JPGs and write 90-degree clockwise rotated copies."""
 
 import os
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PIL import Image, ImageOps
 
 JPG_EXTENSIONS = (".jpg", ".jpeg")
 JPEG_QUALITY = 95
+LOG_FILE_NAME = "JpgRotator_log.txt"
+MAX_PENDING_LOG_LINES = 1000
+
+
+class LogFile:
+    """Appends log lines to LOG_FILE_NAME in a folder. Safe to call from any thread.
+
+    If the folder can't be written yet (e.g. drive not connected), lines are kept in
+    memory and written the next time a write succeeds.
+    """
+
+    def __init__(self, folder=None):
+        self._lock = threading.Lock()
+        self._pending = []
+        self.folder = folder
+
+    @property
+    def path(self):
+        return os.path.join(self.folder, LOG_FILE_NAME) if self.folder else None
+
+    def set_folder(self, folder):
+        with self._lock:
+            self.folder = folder
+
+    def write(self, line):
+        with self._lock:
+            self._pending.append(line)
+            del self._pending[:-MAX_PENDING_LOG_LINES]
+            if not self.folder or not os.path.isdir(self.folder):
+                return
+            try:
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write("\n".join(self._pending) + "\n")
+                self._pending.clear()
+            except OSError:
+                pass
 
 
 def find_recent_jpgs(input_dir, days):
@@ -58,15 +95,31 @@ def rotate_jpg(src_path, dst_path):
                 os.remove(tmp_path)
 
 
-def process(input_dir, output_dir, days, log, should_stop=lambda: False):
+def new_state():
+    """State carried between repeated checks so the same problem is not logged every time."""
+    return {"failed": {}, "folder_problem": None}
+
+
+def _folder_problem(state, message, log):
+    if state["folder_problem"] != message:
+        log(message)
+        state["folder_problem"] = message
+
+
+def process(input_dir, output_dir, days, log, should_stop=lambda: False, state=None):
     """Rotate every recent JPG in input_dir into output_dir, skipping ones already done.
 
-    `log` is called with one message string per action. Returns a summary dict.
+    `log` is called once per file created or failed, plus a summary line when a
+    check did something. Files already in output_dir are counted as skipped but not
+    logged one by one, so repeated checks don't flood the log. A file that failed is
+    not retried (or re-logged) until its modified time changes. Returns a summary dict.
     """
+    if state is None:
+        state = new_state()
     summary = {"found": 0, "created": 0, "skipped": 0, "errors": 0}
 
     if not os.path.isdir(input_dir):
-        log(f"ERROR: Input folder not found: {input_dir}")
+        _folder_problem(state, f"ERROR: Input folder not found: {input_dir}", log)
         summary["errors"] += 1
         return summary
 
@@ -75,43 +128,85 @@ def process(input_dir, output_dir, days, log, should_stop=lambda: False):
             os.makedirs(output_dir, exist_ok=True)
             log(f"Created output folder: {output_dir}")
         except OSError as exc:
-            log(f"ERROR: Could not create output folder {output_dir}: {exc}")
+            _folder_problem(state, f"ERROR: Could not create output folder {output_dir}: {exc}", log)
             summary["errors"] += 1
             return summary
 
-    log(f"Scanning {input_dir} for .jpg files from the last {days} day(s)...")
     try:
         files = find_recent_jpgs(input_dir, days)
     except OSError as exc:
-        log(f"ERROR: Could not read input folder: {exc}")
+        _folder_problem(state, f"ERROR: Could not read input folder: {exc}", log)
         summary["errors"] += 1
         return summary
 
+    if state["folder_problem"]:
+        log("Folders are available again.")
+        state["folder_problem"] = None
+
     summary["found"] = len(files)
-    log(f"Found {len(files)} file(s).")
+    new_errors = 0
 
     for src_path, mtime in files:
         if should_stop():
-            log("Stopped by user.")
             break
         name = os.path.basename(src_path)
         dst_path = os.path.join(output_dir, name)
-        modified = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
 
         if os.path.exists(dst_path):
-            log(f"Skipped (already rotated): {name}")
             summary["skipped"] += 1
+            continue
+
+        if state["failed"].get(src_path) == mtime:
+            summary["errors"] += 1  # failed before and unchanged since; don't retry or re-log
             continue
 
         try:
             rotate_jpg(src_path, dst_path)
+            modified = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
             log(f"Created rotated file: {name}  (modified {modified})")
             summary["created"] += 1
+            state["failed"].pop(src_path, None)
         except Exception as exc:  # keep going with the other files
             log(f"ERROR rotating {name}: {exc}")
             summary["errors"] += 1
+            new_errors += 1
+            state["failed"][src_path] = mtime
 
-    log(
-        "Done. Found {found}, created {created}, skipped {skipped}, errors {errors}.".format(**summary)
-    )
+    if summary["created"] or new_errors:
+        log(
+            "Check done. Found {found} file(s) from the last {days} day(s): created {created}, "
+            "already rotated {skipped}, errors {errors}.".format(days=days, **summary)
+        )
     return summary
+
+
+def watch(input_dir, output_dir, days, interval_seconds, log, status, stop_event):
+    """Check the input folder now, then every `interval_seconds` until stop_event is set.
+
+    An interval of 0 means check once only. `status` is called with a short one-line
+    description of the last check, for display (it is not logged).
+    """
+    if interval_seconds > 0:
+        log(
+            f"Started. Watching {input_dir} every {interval_seconds} s for .jpg files "
+            f"from the last {days} day(s); output to {output_dir}."
+        )
+    else:
+        log(f"Checking {input_dir} once for .jpg files from the last {days} day(s); output to {output_dir}.")
+
+    state = new_state()
+    while not stop_event.is_set():
+        summary = process(input_dir, output_dir, days, log, stop_event.is_set, state)
+        now = datetime.now()
+        text = (
+            "Last check {time}: found {found}, created {created}, already rotated {skipped}, "
+            "errors {errors}.".format(time=now.strftime("%H:%M:%S"), **summary)
+        )
+        if interval_seconds <= 0:
+            status(text)
+            break
+        next_check = now + timedelta(seconds=interval_seconds)
+        status(f"{text}  Next check at {next_check.strftime('%H:%M:%S')}.")
+        stop_event.wait(interval_seconds)
+
+    log("Stopped." if stop_event.is_set() else "Finished.")

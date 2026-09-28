@@ -5,9 +5,14 @@ modified in the last N days (default 7). For each one it saves a copy rotated **
 into an output folder (default `L:\ScanPdf-R`).
 
 - If a file with the same name already exists in the output folder, it is **skipped**, so existing rotated files are never overwritten.
-- Every action is shown in the log area with a timestamp, and each run ends with a summary.
-- **Autorun** tick box: when ticked, processing starts automatically each time the program is opened.
-- Folders, days and the autorun setting are remembered in `%APPDATA%\JpgRotator\settings.json`.
+- **Seconds between checks** (default 60): after pressing Start, the input folder is re-checked this often until you press Stop.
+  Set it to 0 to check just once.
+- Each file created and each error is shown in the log area with a timestamp, and also appended to
+  `JpgRotator_log.txt` in the output folder. Files already rotated are counted rather than listed one by one, so
+  repeated checks don't flood the log. The status bar at the bottom shows the result of the last check and when the next one is due.
+- A file that fails to rotate is logged once, then retried only when the file changes (e.g. once the scanner finishes writing it).
+- **Autorun** tick box: when ticked, checking starts automatically each time the program is opened.
+- Folders, days, seconds and the autorun setting are remembered in `%APPDATA%\JpgRotator\settings.json`.
 - Only the top level of the input folder is scanned (not subfolders).
 
 ## Run from source
