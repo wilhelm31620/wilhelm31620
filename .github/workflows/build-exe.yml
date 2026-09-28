@@ -14,11 +14,19 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: python -m pip install --upgrade pip pillow pyinstaller
-      - name: Build JpgRotator.exe
-        run: python -m PyInstaller --onefile --windowed --name JpgRotator jpg_rotator.py
       - name: Smoke test rotation logic
         run: python -c "import rotate_core, tempfile, os; from PIL import Image; d=tempfile.mkdtemp(); i=os.path.join(d,'in'); os.makedirs(i); Image.new('RGB',(20,10)).save(os.path.join(i,'x.jpg')); s=rotate_core.process(i, os.path.join(d,'out'), 7, print); assert s['created']==1, s"
+      # Folder build (exe + _internal folder): nothing is unpacked to %TEMP% at startup,
+      # which avoids "Failed to start embedded python interpreter!" on locked-down PCs.
+      - name: Build JpgRotator folder
+        run: python -m PyInstaller --noconfirm --onedir --windowed --name JpgRotator jpg_rotator.py
+      - name: Check the exe starts
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\JpgRotator\JpgRotator.exe -ArgumentList '--selftest' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "JpgRotator.exe --selftest failed with exit code $($p.ExitCode)" }
+          Write-Host "exe started OK"
       - uses: actions/upload-artifact@v4
         with:
-          name: JpgRotator-exe
-          path: dist/JpgRotator.exe
+          name: JpgRotator
+          path: dist/JpgRotator/

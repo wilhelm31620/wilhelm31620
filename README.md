@@ -21,7 +21,14 @@ into an output folder (default `L:\ScanPdf-R`).
 3. Double-click `jpg_rotator.py`, or run `python jpg_rotator.py`.
 
 ## Build a standalone .exe
-Double-click `build_exe.bat`. The program is created at `dist\JpgRotator.exe`, and it runs on PCs without Python.
+Double-click `build_exe.bat`. It creates the folder `dist\JpgRotator\` containing `JpgRotator.exe` and an `_internal`
+folder. Copy the **whole folder** to wherever you want it (for example `E:\working\JPG Rotate`). The two must stay
+together. It runs on PCs without Python.
+
+A ready-built copy is also produced by GitHub Actions on every push (the **JpgRotator** download on the Actions run page).
+
+The folder layout is used instead of a single-file exe because single-file exes unpack themselves to `%TEMP%` at
+startup, which antivirus or security policies often block ("Failed to start embedded python interpreter!").
 
 ## Run at Windows login (optional)
 Press `Win+R`, type `shell:startup`, and put a shortcut to `JpgRotator.exe` in that folder. With Autorun ticked,

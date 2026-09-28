@@ -254,7 +254,19 @@ class RotatorApp:
         self.root.destroy()
 
 
+def self_test():
+    """Used by the build to confirm the packaged exe starts: create and close a window, exit 0."""
+    root = tk.Tk()
+    root.withdraw()
+    root.update()
+    root.destroy()
+    import PIL.Image  # noqa: F401  make sure Pillow is bundled
+    sys.exit(0)
+
+
 def main():
+    if "--selftest" in sys.argv:
+        self_test()
     if sys.platform == "win32":
         try:  # crisp text on high-DPI screens
             import ctypes
