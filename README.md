@@ -1,10 +1,17 @@
 # JPG Rotator
 
 A simple Windows program that looks in an input folder (default `L:\ScanPdf`) for `.jpg` / `.jpeg` files
-modified in the last N days (default 7). For each one it saves a copy rotated **90° clockwise**, with the same name,
-into an output folder (default `L:\ScanPdf-R`).
+modified in the last N days (default 7). For each one whose name is **numbers only** (e.g. `82008.jpg`; not
+`Scan 092350.jpg` or `82008_1.jpg`) it saves a copy rotated **90° clockwise**, with the same name, into an output folder
+(default `L:\ScanPdf-R`).
 
-- If a file with the same name already exists in the output folder, it is **skipped**, so existing rotated files are never overwritten.
+- If the rotated copy already exists and the input file is **not newer** than it, the file is skipped.
+- If the input file **is newer** than the existing rotated copy (a new scan with the same name), the old rotated copy
+  is renamed to `82008_1.jpg` (or `_2`, `_3`, ... whichever is the next unused number) and the new rotated image is
+  saved as `82008.jpg`. If the drive refuses renames, the old copy is copied to the new name and then deleted.
+  Note: Windows keeps a file's modified date when copying, so an older file copied into the input folder is not
+  treated as new.
+- JPGs whose names aren't numbers only are ignored (counted in the status bar, not logged).
 - **Seconds between checks** (default 60): after pressing Start, the input folder is re-checked this often until you press Stop.
   Set it to 0 to check just once.
 - Each file created and each error is shown in the log area with a timestamp, and also appended to

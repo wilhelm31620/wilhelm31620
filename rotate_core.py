@@ -2,6 +2,8 @@
 
 import io
 import os
+import re
+import shutil
 import threading
 import traceback
 import time
@@ -13,6 +15,9 @@ JPG_EXTENSIONS = (".jpg", ".jpeg")
 JPEG_QUALITY = 95
 LOG_FILE_NAME = "JpgRotator_log.txt"
 MAX_PENDING_LOG_LINES = 1000
+# An input counts as a new version only if it is this much newer than its rotated copy
+# (allows for drives that store times coarsely, e.g. to 2 seconds).
+MTIME_TOLERANCE_SECONDS = 2
 
 
 class LogFile:
@@ -49,13 +54,22 @@ class LogFile:
                 pass
 
 
-def find_recent_jpgs(input_dir, days):
-    """Return (path, modified_time) for .jpg/.jpeg files in input_dir modified within `days` days.
+def is_numeric_name(file_name):
+    """True for names like '82008.jpg': the part before the extension is digits 0-9 only."""
+    return re.fullmatch(r"[0-9]+", os.path.splitext(file_name)[0]) is not None
 
-    Only the top-level folder is scanned (no subfolders). Newest files come first.
+
+def find_recent_jpgs(input_dir, days):
+    """Find .jpg/.jpeg files in input_dir modified within `days` days.
+
+    Returns (found, ignored): `found` is a list of (path, modified_time) for files
+    whose name is numbers only, newest first; `ignored` is how many other recent
+    JPGs were left out because their name isn't numbers only.
+    Only the top-level folder is scanned (no subfolders).
     """
     cutoff = time.time() - days * 86400
     found = []
+    ignored = 0
     with os.scandir(input_dir) as entries:
         for entry in entries:
             if not entry.is_file():
@@ -63,10 +77,40 @@ def find_recent_jpgs(input_dir, days):
             if not entry.name.lower().endswith(JPG_EXTENSIONS):
                 continue
             mtime = entry.stat().st_mtime
-            if mtime >= cutoff:
+            if mtime < cutoff:
+                continue
+            if is_numeric_name(entry.name):
                 found.append((entry.path, mtime))
+            else:
+                ignored += 1
     found.sort(key=lambda item: item[1], reverse=True)
-    return found
+    return found, ignored
+
+
+def next_free_name(path):
+    """For L:\\out\\82008.jpg return L:\\out\\82008_N.jpg with the lowest N >= 1 not yet used."""
+    stem, ext = os.path.splitext(path)
+    n = 1
+    while os.path.exists(f"{stem}_{n}{ext}"):
+        n += 1
+    return f"{stem}_{n}{ext}"
+
+
+def move_file(src, dst):
+    """Rename src to dst (dst must not exist). If the drive refuses renames, copy then delete."""
+    if os.path.exists(dst):
+        raise FileExistsError(f"{dst} already exists")
+    try:
+        os.rename(src, dst)
+        return
+    except OSError:
+        pass
+    shutil.copy2(src, dst)  # keeps the modified date
+    try:
+        os.remove(src)
+    except OSError:
+        os.remove(dst)  # undo the copy so we don't leave two copies behind
+        raise
 
 
 def rotate_jpg(src_path, dst_path):
@@ -101,10 +145,20 @@ def rotate_jpg(src_path, dst_path):
             os.remove(dst_path)
             raise
 
+    # The rotated copy must never look older than its input, otherwise (e.g. if the
+    # scanner's clock is ahead) the input would keep looking like a new version.
+    src_mtime = os.path.getmtime(src_path)
+    if src_mtime > os.path.getmtime(dst_path):
+        try:
+            os.utime(dst_path, (src_mtime, src_mtime))
+        except OSError:
+            pass
+
 
 def new_state():
     """State carried between repeated checks so the same problem is not logged every time."""
-    return {"failed": {}, "folder_problem": None}
+    # failed: {input path: modified time} that failed; done: {input path: modified time} rotated this session
+    return {"failed": {}, "done": {}, "folder_problem": None}
 
 
 def _folder_problem(state, message, log):
@@ -114,16 +168,22 @@ def _folder_problem(state, message, log):
 
 
 def process(input_dir, output_dir, days, log, should_stop=lambda: False, state=None):
-    """Rotate every recent JPG in input_dir into output_dir, skipping ones already done.
+    """Rotate every recent numbers-only-named JPG in input_dir into output_dir.
 
-    `log` is called once per file created or failed, plus a summary line when a
-    check did something. Files already in output_dir are counted as skipped but not
-    logged one by one, so repeated checks don't flood the log. A file that failed is
-    not retried (or re-logged) until its modified time changes. Returns a summary dict.
+    - No rotated copy yet: create it.
+    - Rotated copy exists and the input is newer than it (a new scan with the same
+      name): rename the old rotated copy to name_1.jpg (name_2.jpg, ... if taken)
+      and create the new rotated copy under the original name.
+    - Otherwise it's already done: skip.
+
+    `log` is called once per file created, renamed or failed, plus a summary line
+    when a check did something. Skipped and ignored files are only counted, so
+    repeated checks don't flood the log. A file that failed is not retried (or
+    re-logged) until its modified time changes. Returns a summary dict.
     """
     if state is None:
         state = new_state()
-    summary = {"found": 0, "created": 0, "skipped": 0, "errors": 0}
+    summary = {"found": 0, "created": 0, "replaced": 0, "skipped": 0, "ignored": 0, "errors": 0}
 
     if not os.path.isdir(input_dir):
         _folder_problem(state, f"ERROR: Input folder not found: {input_dir}", log)
@@ -140,7 +200,7 @@ def process(input_dir, output_dir, days, log, should_stop=lambda: False, state=N
             return summary
 
     try:
-        files = find_recent_jpgs(input_dir, days)
+        files, summary["ignored"] = find_recent_jpgs(input_dir, days)
     except OSError as exc:
         _folder_problem(state, f"ERROR: Could not read input folder: {exc}", log)
         summary["errors"] += 1
@@ -159,30 +219,63 @@ def process(input_dir, output_dir, days, log, should_stop=lambda: False, state=N
         name = os.path.basename(src_path)
         dst_path = os.path.join(output_dir, name)
 
-        if os.path.exists(dst_path):
-            summary["skipped"] += 1
-            continue
-
         if state["failed"].get(src_path) == mtime:
             summary["errors"] += 1  # failed before and unchanged since; don't retry or re-log
             continue
 
         try:
-            rotate_jpg(src_path, dst_path)
-            modified = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            is_new_version = False
+            if os.path.exists(dst_path):
+                already_done = state["done"].get(src_path) == mtime
+                if already_done or mtime <= os.path.getmtime(dst_path) + MTIME_TOLERANCE_SECONDS:
+                    summary["skipped"] += 1
+                    continue
+                is_new_version = True
+        except OSError as exc:
+            log(f"ERROR checking {name}: {exc}")
+            summary["errors"] += 1
+            new_errors += 1
+            state["failed"][src_path] = mtime
+            continue
+
+        modified = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        old_copy = None
+        try:
+            if is_new_version:
+                old_copy = next_free_name(dst_path)
+                try:
+                    move_file(dst_path, old_copy)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"a newer {name} arrived but the old rotated copy could not be renamed to "
+                        f"{os.path.basename(old_copy)}, so nothing was changed: {exc}"
+                    ) from exc
+                log(f"Newer {name} found (modified {modified}). Renamed old rotated {name} -> {os.path.basename(old_copy)}")
+            try:
+                rotate_jpg(src_path, dst_path)
+            except Exception:
+                if old_copy and not os.path.exists(dst_path):
+                    try:  # put the old rotated copy back under its original name
+                        move_file(old_copy, dst_path)
+                        log(f"Put old rotated {os.path.basename(old_copy)} back as {name}")
+                    except Exception as undo_exc:
+                        log(f"ERROR: could not rename {os.path.basename(old_copy)} back to {name}: {undo_exc}")
+                raise
             log(f"Created rotated file: {name}  (modified {modified})")
-            summary["created"] += 1
+            summary["replaced" if is_new_version else "created"] += 1
             state["failed"].pop(src_path, None)
+            state["done"][src_path] = mtime
         except Exception as exc:  # keep going with the other files
             log(f"ERROR rotating {name}: {exc}")
             summary["errors"] += 1
             new_errors += 1
             state["failed"][src_path] = mtime
 
-    if summary["created"] or new_errors:
+    if summary["created"] or summary["replaced"] or new_errors:
         log(
-            "Check done. Found {found} file(s) from the last {days} day(s): created {created}, "
-            "already rotated {skipped}, errors {errors}.".format(days=days, **summary)
+            "Check done. Found {found} numbered file(s) from the last {days} day(s): created {created}, "
+            "new versions {replaced}, already rotated {skipped}, errors {errors}; "
+            "{ignored} other .jpg file(s) ignored (name not numbers only).".format(days=days, **summary)
         )
     return summary
 
@@ -195,11 +288,11 @@ def watch(input_dir, output_dir, days, interval_seconds, log, status, stop_event
     """
     if interval_seconds > 0:
         log(
-            f"Started. Watching {input_dir} every {interval_seconds} s for .jpg files "
-            f"from the last {days} day(s); output to {output_dir}."
+            f"Started. Watching {input_dir} every {interval_seconds} s for numbered .jpg files "
+            f"(e.g. 82008.jpg) from the last {days} day(s); output to {output_dir}."
         )
     else:
-        log(f"Checking {input_dir} once for .jpg files from the last {days} day(s); output to {output_dir}.")
+        log(f"Checking {input_dir} once for numbered .jpg files from the last {days} day(s); output to {output_dir}.")
 
     state = new_state()
     while not stop_event.is_set():
@@ -207,11 +300,11 @@ def watch(input_dir, output_dir, days, interval_seconds, log, status, stop_event
             summary = process(input_dir, output_dir, days, log, stop_event.is_set, state)
         except Exception:
             log("ERROR: unexpected problem during check:\n" + traceback.format_exc().rstrip())
-            summary = {"found": 0, "created": 0, "skipped": 0, "errors": 1}
+            summary = {"found": 0, "created": 0, "replaced": 0, "skipped": 0, "ignored": 0, "errors": 1}
         now = datetime.now()
         text = (
-            "Last check {time}: found {found}, created {created}, already rotated {skipped}, "
-            "errors {errors}.".format(time=now.strftime("%H:%M:%S"), **summary)
+            "Last check {time}: found {found}, created {created}, new versions {replaced}, "
+            "already rotated {skipped}, errors {errors}, ignored (not numbers) {ignored}.".format(time=now.strftime("%H:%M:%S"), **summary)
         )
         if interval_seconds <= 0:
             status(text)
