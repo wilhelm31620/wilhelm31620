@@ -15,7 +15,7 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip pillow pyinstaller
       - name: Smoke test rotation logic
-        run: python -c "import rotate_core, tempfile, os; from PIL import Image; d=tempfile.mkdtemp(); i=os.path.join(d,'in'); os.makedirs(i); Image.new('RGB',(20,10)).save(os.path.join(i,'x.jpg')); s=rotate_core.process(i, os.path.join(d,'out'), 7, print); assert s['created']==1, s"
+        run: python -c "import rotate_core, tempfile, os; from PIL import Image; d=tempfile.mkdtemp(); i=os.path.join(d,'in'); os.makedirs(i); Image.new('RGB',(20,10)).save(os.path.join(i,'12345.jpg')); s=rotate_core.process(i, os.path.join(d,'out'), 7, print); assert s['created']==1, s"
       # Folder build (exe + _internal folder): nothing is unpacked to %TEMP% at startup,
       # which avoids "Failed to start embedded python interpreter!" on locked-down PCs.
       - name: Build JpgRotator folder
