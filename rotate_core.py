@@ -1,4 +1,4 @@
-"""Core logic: find recent JPGs and write 90-degree clockwise rotated copies."""
+"""Core logic: find recent JPG/PNG images and write 90-degree clockwise rotated copies."""
 
 import io
 import os
@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from PIL import Image, ImageOps
 
 JPG_EXTENSIONS = (".jpg", ".jpeg")
+PNG_EXTENSIONS = (".png",)
+IMAGE_EXTENSIONS = JPG_EXTENSIONS + PNG_EXTENSIONS
 JPEG_QUALITY = 95
 LOG_FILE_NAME = "JpgRotator_log.txt"
 MAX_PENDING_LOG_LINES = 1000
@@ -55,16 +57,16 @@ class LogFile:
 
 
 def is_numeric_name(file_name):
-    """True for names like '82008.jpg': the part before the extension is digits 0-9 only."""
+    """True for names like '82008.jpg' or '82008.png': the part before the extension is digits 0-9 only."""
     return re.fullmatch(r"[0-9]+", os.path.splitext(file_name)[0]) is not None
 
 
-def find_recent_jpgs(input_dir, days):
-    """Find .jpg/.jpeg files in input_dir modified within `days` days.
+def find_recent_images(input_dir, days):
+    """Find .jpg/.jpeg/.png files in input_dir modified within `days` days.
 
     Returns (found, ignored): `found` is a list of (path, modified_time) for files
     whose name is numbers only, newest first; `ignored` is how many other recent
-    JPGs were left out because their name isn't numbers only.
+    images were left out because their name isn't numbers only.
     Only the top-level folder is scanned (no subfolders).
     """
     cutoff = time.time() - days * 86400
@@ -74,7 +76,7 @@ def find_recent_jpgs(input_dir, days):
         for entry in entries:
             if not entry.is_file():
                 continue
-            if not entry.name.lower().endswith(JPG_EXTENSIONS):
+            if not entry.name.lower().endswith(IMAGE_EXTENSIONS):
                 continue
             mtime = entry.stat().st_mtime
             if mtime < cutoff:
@@ -113,11 +115,12 @@ def move_file(src, dst):
         raise
 
 
-def rotate_jpg(src_path, dst_path):
+def rotate_image(src_path, dst_path):
     """Save a copy of src_path rotated 90 degrees clockwise to dst_path.
 
     Any EXIF orientation flag is applied first, so the output is rotated relative
-    to how the image actually displays. The JPEG is built in memory and written in
+    to how the image actually displays. The output format matches the file extension
+    (JPEG at quality 95, or lossless PNG keeping transparency). The file is built in memory and written in
     one go; if writing fails part way, the partial file is deleted. (No temp-file +
     rename, because some network/cloud drives refuse renames - WinError 17.)
     """
@@ -125,16 +128,20 @@ def rotate_jpg(src_path, dst_path):
         img = ImageOps.exif_transpose(img)
         rotated = img.transpose(Image.Transpose.ROTATE_270)  # 270 counter-clockwise == 90 clockwise
 
-        save_kwargs = {"quality": JPEG_QUALITY}
+        is_png = dst_path.lower().endswith(PNG_EXTENSIONS)
+        save_kwargs = {} if is_png else {"quality": JPEG_QUALITY}
         if "dpi" in img.info:
             save_kwargs["dpi"] = img.info["dpi"]
         if img.info.get("icc_profile"):
             save_kwargs["icc_profile"] = img.info["icc_profile"]
-        if rotated.mode not in ("RGB", "L", "CMYK"):
+        if is_png:
+            if "transparency" in img.info:
+                save_kwargs["transparency"] = img.info["transparency"]
+        elif rotated.mode not in ("RGB", "L", "CMYK"):
             rotated = rotated.convert("RGB")
 
         buffer = io.BytesIO()
-        rotated.save(buffer, "JPEG", **save_kwargs)
+        rotated.save(buffer, "PNG" if is_png else "JPEG", **save_kwargs)
 
     # "xb" = create only; never overwrites a file that already exists.
     with open(dst_path, "xb") as f:
@@ -168,7 +175,7 @@ def _folder_problem(state, message, log):
 
 
 def process(input_dir, output_dir, days, log, should_stop=lambda: False, state=None):
-    """Rotate every recent numbers-only-named JPG in input_dir into output_dir.
+    """Rotate every recent numbers-only-named JPG/PNG in input_dir into output_dir.
 
     - No rotated copy yet: create it.
     - Rotated copy exists and the input is newer than it (a new scan with the same
@@ -200,7 +207,7 @@ def process(input_dir, output_dir, days, log, should_stop=lambda: False, state=N
             return summary
 
     try:
-        files, summary["ignored"] = find_recent_jpgs(input_dir, days)
+        files, summary["ignored"] = find_recent_images(input_dir, days)
     except OSError as exc:
         _folder_problem(state, f"ERROR: Could not read input folder: {exc}", log)
         summary["errors"] += 1
@@ -252,7 +259,7 @@ def process(input_dir, output_dir, days, log, should_stop=lambda: False, state=N
                     ) from exc
                 log(f"Newer {name} found (modified {modified}). Renamed old rotated {name} -> {os.path.basename(old_copy)}")
             try:
-                rotate_jpg(src_path, dst_path)
+                rotate_image(src_path, dst_path)
             except Exception:
                 if old_copy and not os.path.exists(dst_path):
                     try:  # put the old rotated copy back under its original name
@@ -275,7 +282,7 @@ def process(input_dir, output_dir, days, log, should_stop=lambda: False, state=N
         log(
             "Check done. Found {found} numbered file(s) from the last {days} day(s): created {created}, "
             "new versions {replaced}, already rotated {skipped}, errors {errors}; "
-            "{ignored} other .jpg file(s) ignored (name not numbers only).".format(days=days, **summary)
+            "{ignored} other .jpg/.png file(s) ignored (name not numbers only).".format(days=days, **summary)
         )
     return summary
 
@@ -288,11 +295,11 @@ def watch(input_dir, output_dir, days, interval_seconds, log, status, stop_event
     """
     if interval_seconds > 0:
         log(
-            f"Started. Watching {input_dir} every {interval_seconds} s for numbered .jpg files "
+            f"Started. Watching {input_dir} every {interval_seconds} s for numbered .jpg/.png files "
             f"(e.g. 82008.jpg) from the last {days} day(s); output to {output_dir}."
         )
     else:
-        log(f"Checking {input_dir} once for numbered .jpg files from the last {days} day(s); output to {output_dir}.")
+        log(f"Checking {input_dir} once for numbered .jpg/.png files from the last {days} day(s); output to {output_dir}.")
 
     state = new_state()
     while not stop_event.is_set():

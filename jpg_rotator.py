@@ -1,6 +1,6 @@
 """JPG Rotator - Windows GUI.
 
-Looks in an input folder for .jpg files modified in the last N days and writes a
+Looks in an input folder for .jpg/.png files modified in the last N days and writes a
 copy rotated 90 degrees clockwise, with the same name, to an output folder.
 Files that already exist in the output folder are skipped. The input folder is
 re-checked every N seconds until Stop is pressed, and the log is also saved to
