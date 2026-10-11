@@ -33,7 +33,10 @@ Double-click `build_exe.bat`. It creates the folder `dist\JpgRotator\` containin
 folder. Copy the **whole folder** to wherever you want it (for example `E:\working\JPG Rotate`). The two must stay
 together. It runs on PCs without Python.
 
-A ready-built copy is also produced by GitHub Actions on every push (the **JpgRotator** download on the Actions run page).
+Ready-built copies are produced by GitHub Actions on every push (downloads on the Actions run page):
+- **JpgRotator-single-file**: one `JpgRotator.exe`. At startup it unpacks itself into `%LOCALAPPDATA%\JpgRotator`
+  (not `%TEMP%`), so the first start takes a few seconds.
+- **JpgRotator**: the folder version (`JpgRotator.exe` + `_internal`). Use this if the single file won't start.
 
 The folder layout is used instead of a single-file exe because single-file exes unpack themselves to `%TEMP%` at
 startup, which antivirus or security policies often block ("Failed to start embedded python interpreter!").
