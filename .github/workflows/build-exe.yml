@@ -30,3 +30,20 @@ jobs:
         with:
           name: JpgRotator
           path: dist/JpgRotator/
+      # Single-file build. It unpacks itself at startup into %LOCALAPPDATA%\JpgRotator
+      # instead of %TEMP%, because running from %TEMP% was blocked on the target PC.
+      - name: Build single-file JpgRotator.exe
+        run: python -m PyInstaller --noconfirm --onefile --windowed --name JpgRotator --runtime-tmpdir "%LOCALAPPDATA%\JpgRotator" --distpath dist-single --workpath build-single jpg_rotator.py
+      - name: Check the single-file exe starts and unpacks to LOCALAPPDATA
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:LOCALAPPDATA 'JpgRotator'
+          if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+          $p = Start-Process -FilePath dist-single\JpgRotator.exe -ArgumentList '--selftest' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "single-file JpgRotator.exe --selftest failed with exit code $($p.ExitCode)" }
+          if (-not (Test-Path $target)) { throw "single-file exe did not unpack into $target" }
+          Write-Host "single-file exe started OK and unpacked into $target"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JpgRotator-single-file
+          path: dist-single/JpgRotator.exe
